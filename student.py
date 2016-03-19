@@ -196,7 +196,7 @@ class TransactionHandler:
                 return value
         #if there is key
         else:
-            mode = self._lock_table[key][0][0][0]
+            
             grantedGroup = self._lock_table[key][0]
             waitingGroup = self._lock_table[key][1]
             #If there is no grantedGroup and no waitingGroup
@@ -210,6 +210,7 @@ class TransactionHandler:
                 return value
             #If there is grantedGroup
             else:
+                mode = self._lock_table[key][0][0][0]
                 #if the grantedGroup is for sharing    
                 if mode == 's':
                     #If this transaction is already in grantedGroup
@@ -271,48 +272,81 @@ class TransactionHandler:
         2) The first n consecutive xacts that want S locks. This set will end at the 
     first xact that wants a X lock - or at the end of the queue
         """
-        """
-        # Empty waiting queue
+        
+        # release the transaction from grantedGroup
         if self._desired_lock is not None:
-            waitingLock = self._desired_lock.pop() #[key, ['s',T1]]
-            waitingKey = waitingLock[0] #key
-            waitingHandler = waitingLock[1][1] #T1
-            waitingAction = waitingLock[1][0]  #'s'
+           waitingKey = self._desired_lock[0]
+           waitingTransaction = self._desired_lock[1]
+           idx = self._lock_table[waitingKey][1].index(waitingTransaction)
+           #release the transaction from grantGroup
+           del self._lock_table[waitingKey][0][idx]
 
 
         #Releases all locks acquired by the transaction and grants them to the
-        #next transactions in the queue.  _acquired_locks:[ [key, value, [self, 's']], [key, value, [self, 's']], ...]
+        #next transactions in the queue.  _acquired_locks:[ [key, [self, 's']], [key, [self, 's']], ...]
         for l in self._acquired_locks:
             key = l[0] 
-            axt = l[2] 
-            handler = l[2][0] #self
-
-            #if other transactions are in,
-            if len(self._lock_table[key][1])>1:
-                index = self._lock_table[key][1].index(handler)
-                del self._lock_table[key][1][index]
-                #Check if nextHandler is able to be upgraded
-                if len(self._lock_table[key][1]) == 1:
-                    nextHandler = self._lock_table[key][1][0]
-                    if self._lock_table[key][0] == 's' and waitingAction = 'e' and nextHandler in self._lock_table[key][1]:
-                        #realease lock and upgrade
-                        self._lock_table[key][0] = 'e'
-                        self._lock_table[key][1] = [waitingHandler]
+            trans = l[1] 
+            
+            #if there is other transaction sharing the current lock, 
+            if len(self._lock_table[key][0])!=1:
+                #release the lock, and the transaction from grantedGroup
+                idx = self._lock_table[key][0].index(trans)
+                del self._lock_table[key][0][idx]
+                #Check if the one left is able to be upgraded
+                if len(self._lock_table[key][0]) == 1: #[ [['s', self]] , [] ]
+                    transaction = self._lock_table[key][0][0]
+                    mode = transaction[0]
+                    handler = transaction[1]
+                    #if transaction is shared and it is also waiting for exclusive lock,
+                    if mode == 's' and ['e' , handler] in  self._lock_table[key][1]:
+                        #delete it from waiting group
+                        idx = self._lock_table[key][1].index(['e', handler])
+                        del self._lock_table[key][1][idx]
+                        #update grantedGroup in self lock_table
+                        self._lock_table[key][0] = [ ['e', handler] ]
                         #update _acquired_locks
-                        acIndex = waitingHandler._acquired_locks.index([key, value, [waitingHandler, 's']])
-                        waitingHandler._acquired_locks[acIndex][2][1] = 'x'
+                        acIndex = handler._acquired_locks.index([key, ['s', handler]])
+                        handler._acquired_locks[acIndex][1][1] = 'e'
                         ######
                         # you want to make sure all traces of the shared lock are removed from 
                         #the lock table and from _acquired_locks.
                         ####
-            #if other transation are not in,
+            #if other transation are not sharing this lock
             else:
+                waitingGroup = self._lock_table[key][1]
+                #if there is no waiting group
+                if len(waitingGroup)== 0:
+                    self._lock_table[key] = [ [],[] ]
+                #if there is waiting group
+                else:
+                    #if the first dequeued one is waiting for exclusive lock, 
+                    #we grant exclusive lock to this one
+                    if waitingGroup[0][0] == 'e':
+                        waitingTransaction  = waitingGroup.pop()
+                        waitingHandler = waitingTransaction[1]
+                        self._lock_table[0] = [waitingTransaction]
+                        waitingHandler._acquired_locks.append([key, waitingTransaction])
+                    #if the first dequeued one is waiting for shared lock, 
+                    #find new grantedGroup
+                    else:
+                        numReaders = 0;
+                        self._lock_table[key][0] = []
+                        for t in waitingGroup:
+                            if t[0] == 'e':
+                                break
+                            else:
+                                #add to grantedGroup
+                                self._lock_table[key][0].append(t)
+                                #update 
+                                t[1]._acquired_locks.append( [key, t])
+                                numReaders+=1
+                        for i in range(numReaders):
+                            self._lock_table[key][1].pop()
 
-            #mode = _desired_lock.peek()[2]
 
-            
-           # self._lock_table.clear()
-           """
+
+        self._undo_log = []                    
         self._acquired_locks = []
 
     def commit(self):
