@@ -1,5 +1,5 @@
 import logging
-from Queue import PriorityQueue
+
 
 
 from kvstore import DBMStore, InMemoryKVStore
@@ -88,84 +88,79 @@ class TransactionHandler:
 
 
 
-        #if there is no lock_table, we create one
-        if len(self._lock_table.keys())== 0:
-            self._lock_table[key] = ['e', [self]]
-            self._acquired_locks.append([key, [self, 'e']])
+        #if the lock table does not contain the key entry yet, you should create one.
+        if key not in self._lock_table.keys():
+            #Lock Table contains current lock mode and granted group
+            #Lock Table contains waiting a queue of transactions and lock mode
+            self._lock_table[key] = [ [['e', self]] , [] ]
+            self._acquired_locks.append( [key, ['e', self]] )
+
+            preV = self._store.get(key)
             self._store.put(key, value)
-            self._undo_log.append((key, None))
-            
+            self._undo_log.append((key, preV))   
             return 'Success'
         else:
-            if key in self._lock_table:
-                mode = self._lock_table[key][0]
-                transactionList = self._lock_table[key][1]
+            mode = self._lock_table[key][0][0][0]
+            grantedGroup = self._lock_table[key][0]
+            waitingGroup = self._lock_table[key][1]
+            #If grantedGroup is empty
+            if len(grantedGroup)== 0:
+                self._lock_table[key][0].append(['e', self])
+                self._acquired_locks.append( [key, ['e', self]])
+                #For log
+                v = self._store.get(key)
+                self._undo_log.append( [key,v] )
+                self._store.put(key, value)
+                return 'Success'
+            #If we have grantedGroup
+            else:
+                #if it is a shared Group
                 if mode == 's':
-                    #if current transaction is currently sharing this lock
-                    if self in transactionList:
+                    #if current transaction is in grantedGroup
+                    #And, there is no other transcation waiting for this lock
+                    if ['s', self] in grantedGroup and len(waitingGroup)==0:
                         #check if it is the only transaction holding shared lock
                         #If it is, we can upgrade to exclusive lock, then, PUT
-                        if len(transactionList)==1 :
-                            self._lock_table[key][0] = 'e'
-                            self._acquired_locks.append([key, [self, 'e']])
+                        if len(grantedGroup)==1:
+                            #update mode to exclusive
+                            self._lock_table[key][0][0][0] = 'e'
+                            #update acquired_locks
+                            acIndex = self._acquired_locks.index([key, ['s', self]])
+                            self._acquired_locks[acIndex][1][0] = 'e'
+                            #For log
+                            preV = preV = self._store.get(key)
+                            self._undo_log.append((key, preV))
                             self._store.put(key, value)
-                            self._undo_log.append((key, None))
                             return 'Success'
                         #If there are other transactions sharing this lock
-                        #we put this transaction in queue 
+                        #we put this transaction in waitingGroup and desired_lock
                         #since other transactions are using it
                         else:
-                            if self._desired_lock:
-                                self._desired_lock.put((key, self, 'e'))
-                                #desired_lock.put(key, self.xid, 'e')
-                                return None
-                            else:
-                                self._desired_lock = PriorityQueue()
-                                self._desired_lock.put((key, self, 'e'))
-                                #desired_lock.put(key, self.xid, 'e')
-                                return None
-                    #If this transaction is not in the list, 
+                            self._lock_table[key][1].append(['e',self])
+                            self._desired_lock = [key, value, [self, 'e']]
+                            return None
+                    #If this transaction is not in the grantedGroup, 
                     #And, the lock is shared by other transaction/transactions
-                    #we put this in queue
+                    #we put transaction in waitingGroup, and desired_locks
                     else: 
-                        if self._desired_lock:
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
-                        else:
-                            self._desired_lock = PriorityQueue()
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
+                        self._lock_table[key][1].append(['e',self])
+                        self._desired_lock = [key, value, [self, 'e']]
+                        return None
                 elif mode == 'e':
                     #if this transaction is currently holding exclusive lock,
                     #Success
-                    if transactionList[0]==self:
-                        self._lock_table[key][0] = 'e'
-                        self._acquired_locks.append([key, [self, 'e']])
+                    if ['e', self] in grantedGroup:
+                        #For log
+                        preV = self._store.get(key)
+                        self._undo_log.append((key, preV))
                         self._store.put(key, value)
-                        self._undo_log.append((key, None))
                         return 'Success'
+                    #If this exclusive lock is held by other transaction, 
+                    #We put this in our waitingGroup, and desired_lock
                     else:
-                        if self._desired_lock:
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
-                        else:
-                            self._desired_lock = PriorityQueue()
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
-
-
-        #else we need to put the lock in self._desired_lock and return None
-            #if key is not in our lock_table, we can grant the lock to this transac
-            else: 
-                self._lock_table[key] = ['e',[self]]
-                self._acquired_locks.append([key, [self, 'e']])
-                self._store.put(key, value)
-                self._undo_log.append((key, None))
-                return 'Success'
+                        self._lock_table[key][1].append(['e',self])
+                        self._desired_lock = [key, value, [self, 'e']]
+                        return None
 
         
 
@@ -189,74 +184,75 @@ class TransactionHandler:
         """
         # Part 1.1: your code here!
         #if there is no lock_table, we create one
-        if len(self._lock_table.keys())== 0:
-            self._lock_table[key] = ['s', [self]]
-            self._acquired_locks.append([key, [self, 's']])
-            #self._undo_log.append(key, None)
-            #self._desired_lock.pop()
+        if key not in self._lock_table.keys():
+            #Lock Table contains current lock mode and granted group
+            #Lock Table contains waiting a queue of transactions and lock mode
+            self._lock_table[key] = [ [['s', self]] , [] ]
+            self._acquired_locks.append([key, ['s', self]])
             value = self._store.get(key)
             if value is None:
                 return 'No such key'
             else:
                 return value
-        #if there is lock_table
+        #if there is key
         else:
-            #If key is in our lock_table, and if it is shared lock,
-            #we need this transaction to the list for share
-            if key in self._lock_table:
-                mode = self._lock_table[key][0]
-                transactionList = self._lock_table[key][1]
-                if mode == 's':
-                    if self not in transactionList:
-                        self._lock_table[key][1].append(self)
-                        self._acquired_locks.append([key, [self, 's']])
-                        #self._undo_log.append(key, None)
-                        #self._desired_lock.pop()
-                        value = self._store.get(key)
-                        if value is None:
-                            return 'No such key'
-                        else:
-                            return value
-                    #If this transaction is already sharing this lock
-                    else:
-                        value = self._store.get(key)
-                        if value is None:
-                            return 'No such key'
-                        else:
-                            return value
-                #If it is exclusive lock,
-                elif mode == 'e':
-                    #if other transaction is holding a e-lock on this key
-                    #we put it in queue
-                    if self != transactionList[0]:
-                        if self._desired_lock:
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
-                        else:
-                            self._desired_lock = PriorityQueue()
-                            self._desired_lock.put((key, self, 'e'))
-                            #desired_lock.put(key, self.xid, 'e')
-                            return None
-                    #If this lock already has exclusive lock, we return value
-                    else:
-                        value = self._store.get(key)
-                        if value is None:
-                            return 'No such key'
-                        else:
-                            return value
-
-    
-            #If lock_table does not have this key
-            #No other transaction is locking this key
-            else:
-                self._lock_table[key] = ['s', [self]]
-                self._acquired_locks.append([key, [self, 's']])
+            mode = self._lock_table[key][0][0][0]
+            grantedGroup = self._lock_table[key][0]
+            waitingGroup = self._lock_table[key][1]
+            #If there is no grantedGroup and no waitingGroup
+            if len(grantedGroup) == 0 and len(waitingGroup) == 0:
+                #set lock for this transaction
+                self._lock_table[key][0].append( ['s', self] )
+                self._acquired_locks.append( [key, ['s', self]] )
                 value = self._store.get(key)
                 if value is None:
                     return 'No such key'
-                else:
-                    return value
+                return value
+            #If there is grantedGroup
+            else:
+                #if the grantedGroup is for sharing    
+                if mode == 's':
+                    #If this transaction is already in grantedGroup
+                    if ['s', self] in grantedGroup:
+                        value = self._store.get(key)
+                        if value is None:
+                            return 'No such key'
+                        return value
+                    #If this is not in grantedGroup,
+                    else:
+                        #If there is no waiting group,
+                        #It is compatible
+                        if len(waitingGroup) == 0:
+                            self._lock_table[key][0].append( ['s', self] )
+                            self._acquired_locks.append( [key, ['s', self]] )
+                            value = self._store.get(key)
+                            if value is None:
+                                return 'No such key'
+                            return value
+                        #If there is a waiting group,
+                        #It is not compatible
+                        else:
+                            self._lock_table[key][1].append( ['s',self] )
+                            self._desired_lock = [key, 0, ['s', self]]
+                            return None
+                elif mode == 'e':
+                    #If this transection has exclusive lock on this key,
+                    if ['e', self] in grantedGroup:
+                        value = self._store.get(key)
+                        if value is None:
+                            return 'No such key'
+                        return value
+                    #if other transaction is holding a e-lock on this key
+                    #we put it in queue, _desired_locks
+                    else:
+                        self._lock_table[key][1].append( ['s',self] )
+                        self._desired_lock = [key, ['s', self]]
+                        return None
+
+        
+
+
+
 
     def release_and_grant_locks(self):
         """
@@ -275,20 +271,48 @@ class TransactionHandler:
         2) The first n consecutive xacts that want S locks. This set will end at the 
     first xact that wants a X lock - or at the end of the queue
         """
-        # clear waiting queue
-        #if self._desired_lock is not None:
+        """
+        # Empty waiting queue
+        if self._desired_lock is not None:
+            waitingLock = self._desired_lock.pop() #[key, ['s',T1]]
+            waitingKey = waitingLock[0] #key
+            waitingHandler = waitingLock[1][1] #T1
+            waitingAction = waitingLock[1][0]  #'s'
 
 
         #Releases all locks acquired by the transaction and grants them to the
-        #next transactions in the queue.  _acquired_locks:[ [key, [self, 's']], [key, [self, 's']], ...]
+        #next transactions in the queue.  _acquired_locks:[ [key, value, [self, 's']], [key, value, [self, 's']], ...]
         for l in self._acquired_locks:
-            pass
-            #key = l[0]
-            #axt = l[1]
+            key = l[0] 
+            axt = l[2] 
+            handler = l[2][0] #self
+
+            #if other transactions are in,
+            if len(self._lock_table[key][1])>1:
+                index = self._lock_table[key][1].index(handler)
+                del self._lock_table[key][1][index]
+                #Check if nextHandler is able to be upgraded
+                if len(self._lock_table[key][1]) == 1:
+                    nextHandler = self._lock_table[key][1][0]
+                    if self._lock_table[key][0] == 's' and waitingAction = 'e' and nextHandler in self._lock_table[key][1]:
+                        #realease lock and upgrade
+                        self._lock_table[key][0] = 'e'
+                        self._lock_table[key][1] = [waitingHandler]
+                        #update _acquired_locks
+                        acIndex = waitingHandler._acquired_locks.index([key, value, [waitingHandler, 's']])
+                        waitingHandler._acquired_locks[acIndex][2][1] = 'x'
+                        ######
+                        # you want to make sure all traces of the shared lock are removed from 
+                        #the lock table and from _acquired_locks.
+                        ####
+            #if other transation are not in,
+            else:
+
             #mode = _desired_lock.peek()[2]
 
             
            # self._lock_table.clear()
+           """
         self._acquired_locks = []
 
     def commit(self):
