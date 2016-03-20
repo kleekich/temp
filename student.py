@@ -100,7 +100,6 @@ class TransactionHandler:
             self._undo_log.append((key, preV))   
             return 'Success'
         else:
-            mode = self._lock_table[key][0][0][0]
             grantedGroup = self._lock_table[key][0]
             waitingGroup = self._lock_table[key][1]
             #If grantedGroup is empty
@@ -114,6 +113,7 @@ class TransactionHandler:
                 return 'Success'
             #If we have grantedGroup
             else:
+                mode = self._lock_table[key][0][0][0]
                 #if it is a shared Group
                 if mode == 's':
                     #if current transaction is in grantedGroup
@@ -135,16 +135,18 @@ class TransactionHandler:
                         #If there are other transactions sharing this lock
                         #we put this transaction in waitingGroup and desired_lock
                         #since other transactions are using it
-                        else:
+                        elif len(grantedGroup)>1:
                             self._lock_table[key][1].append(['e',self])
-                            self._desired_lock = [key, value, [self, 'e']]
+                            self._desired_lock = [key, ['e',self], value]
+                            
                             return None
                     #If this transaction is not in the grantedGroup, 
                     #And, the lock is shared by other transaction/transactions
                     #we put transaction in waitingGroup, and desired_locks
                     else: 
                         self._lock_table[key][1].append(['e',self])
-                        self._desired_lock = [key, value, [self, 'e']]
+                        self._desired_lock = [key, ['e',self], value]
+                        
                         return None
                 elif mode == 'e':
                     #if this transaction is currently holding exclusive lock,
@@ -159,7 +161,7 @@ class TransactionHandler:
                     #We put this in our waitingGroup, and desired_lock
                     else:
                         self._lock_table[key][1].append(['e',self])
-                        self._desired_lock = [key, value, [self, 'e']]
+                        self._desired_lock = [key, ['e',self], value]
                         return None
 
         
@@ -196,7 +198,6 @@ class TransactionHandler:
                 return value
         #if there is key
         else:
-            
             grantedGroup = self._lock_table[key][0]
             waitingGroup = self._lock_table[key][1]
             #If there is no grantedGroup and no waitingGroup
@@ -234,7 +235,7 @@ class TransactionHandler:
                         #It is not compatible
                         else:
                             self._lock_table[key][1].append( ['s',self] )
-                            self._desired_lock = [key, 0, ['s', self]]
+                            self._desired_lock = [key, ['s', self], 0]
                             return None
                 elif mode == 'e':
                     #If this transection has exclusive lock on this key,
@@ -247,7 +248,7 @@ class TransactionHandler:
                     #we put it in queue, _desired_locks
                     else:
                         self._lock_table[key][1].append( ['s',self] )
-                        self._desired_lock = [key, ['s', self]]
+                        self._desired_lock = [key, ['s', self], 0]
                         return None
 
         
@@ -289,7 +290,7 @@ class TransactionHandler:
             trans = l[1] 
             
             #if there is other transaction sharing the current lock, 
-            if len(self._lock_table[key][0])!=1:
+            if len(self._lock_table[key][0])>1:
                 #release the lock, and the transaction from grantedGroup
                 idx = self._lock_table[key][0].index(trans)
                 del self._lock_table[key][0][idx]
@@ -307,11 +308,8 @@ class TransactionHandler:
                         self._lock_table[key][0] = [ ['e', handler] ]
                         #update _acquired_locks
                         acIndex = handler._acquired_locks.index([key, ['s', handler]])
-                        handler._acquired_locks[acIndex][1][1] = 'e'
-                        ######
-                        # you want to make sure all traces of the shared lock are removed from 
-                        #the lock table and from _acquired_locks.
-                        ####
+                        handler._acquired_locks[acIndex][1][0] = 'e'
+           
             #if other transation are not sharing this lock
             else:
                 waitingGroup = self._lock_table[key][1]
@@ -321,11 +319,11 @@ class TransactionHandler:
                 #if there is waiting group
                 else:
                     #if the first dequeued one is waiting for exclusive lock, 
-                    #we grant exclusive lock to this one
+                    #we grant exclusive lock to this one, and update the acquiring handler 
                     if waitingGroup[0][0] == 'e':
-                        waitingTransaction  = waitingGroup.pop()
+                        waitingTransaction  = self._lock_table[key][1].pop()
                         waitingHandler = waitingTransaction[1]
-                        self._lock_table[0] = [waitingTransaction]
+                        self._lock_table[key][0] = [waitingTransaction]
                         waitingHandler._acquired_locks.append([key, waitingTransaction])
                     #if the first dequeued one is waiting for shared lock, 
                     #find new grantedGroup
@@ -335,12 +333,11 @@ class TransactionHandler:
                         for t in waitingGroup:
                             if t[0] == 'e':
                                 break
-                            else:
-                                #add to grantedGroup
-                                self._lock_table[key][0].append(t)
-                                #update 
-                                t[1]._acquired_locks.append( [key, t])
-                                numReaders+=1
+                            #add to grantedGroup
+                            self._lock_table[key][0].append(t)
+                            #update 
+                            t[1]._acquired_locks.append( [key, t])
+                            numReaders+=1
                         for i in range(numReaders):
                             self._lock_table[key][1].pop()
 
@@ -423,8 +420,22 @@ class TransactionHandler:
         successfully acquired the lock. If the lock has not been granted,
         returns None.
         """
-        pass # Part 1.3: your code here!
 
+        key = self._desired_lock[0]
+        transaction = self._desired_lock[1]
+        mode = transaction[0]
+        value = self._desired_lock[2]
+        
+
+        if[key, transaction] in self._acquired_locks:
+            self._desired_lock = None
+            if mode == 'e':
+                return self.perform_put(key, value)
+            else:
+                return self.perform_get(key)
+        else:
+            return None
+        
 
 
 
@@ -443,6 +454,24 @@ class TransactionCoordinator:
 
     def __init__(self, lock_table):
         self._lock_table = lock_table
+
+    def dfs(self, waitsForGraph, w_xid, visited=None):
+
+        if w_xid not in waitsForGraph:
+            return True
+        
+        if visited is None:
+            visited = set()
+
+        if w_xid in visited:
+            return False
+
+        visited.add(w_xid)
+
+        for g in waitsForGraph[w_xid]:
+            if self.dfs(waitsForGraph, g, visited) == False:
+                return False
+        return True
 
     def detect_deadlocks(self):
         """
@@ -470,4 +499,22 @@ class TransactionCoordinator:
         @return: If there are no cycles in the waits-for graph, returns None.
         Otherwise, returns the xid of a transaction in a cycle.
         """
-        pass # Part 2.1: your code here!
+        
+        #Construct waitsForGraph using Dictionary
+        waitsForGraph = {}                                  
+        for key in self._lock_table.keys():                 
+            for w in self._lock_table[key][1]:         
+                for g in self._lock_table[key][0]:
+                    w_xid = w[1]._xid
+                    g_xid = g[1]._xid
+                    if w_xid not in waitsForGraph.keys():
+                        waitsForGraph[w_xid] = [g_xid]
+                    else:
+                        waitsForGraph[w_xid].append(g_xid)
+
+        #Detect cycle
+        for w_xid in waitsForGraph.keys():
+            if self.dfs(waitsForGraph, w_xid) == False:
+                return w_xid
+        return None
+
